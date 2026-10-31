@@ -1,0 +1,30 @@
+name: Dokploy release
+description: Run a one-shot migration Stack, then promote immutable images to the application Stack.
+inputs:
+  config:
+    description: The product's release configuration, relative to the repository root.
+    default: deploy/release.json
+  images:
+    description: One KEY=image per line, for every key in the configuration's `images`.
+    required: true
+  dokploy-api-key:
+    description: The Dokploy API key.
+    required: true
+  registry-id:
+    description: The Dokploy registry that serves the images.
+    required: true
+  github-token:
+    description: Reads the branch head, to refuse a superseded revision.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Migrate, verify, then promote
+      shell: bash
+      env:
+        RELEASE_CONFIG: ${{ inputs.config }}
+        RELEASE_IMAGES: ${{ inputs.images }}
+        DOKPLOY_API_KEY: ${{ inputs.dokploy-api-key }}
+        DOKPLOY_REGISTRY_ID: ${{ inputs.registry-id }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: python3 "$GITHUB_ACTION_PATH/release.py"
