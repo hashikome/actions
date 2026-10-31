@@ -6,7 +6,7 @@ There is no automatic rollback.
 
 ```yaml
 - uses: actions/checkout@<sha>
-- uses: hashikome/actions/dokploy-release@<full commit sha>
+- uses: hashikome/actions/dokploy-release@v1
   with:
     images: |
       API_IMAGE=${{ needs.image.outputs.api }}
