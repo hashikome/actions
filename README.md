@@ -12,3 +12,8 @@ change here reaches a product through a reviewed bump.
 | [`dokploy-release`](dokploy-release/README.md) | Migrate, verify, then promote immutable images through Dokploy |
 
 Run the tests with `python3 -m unittest discover -s dokploy-release`.
+
+## Licence
+
+[MIT](LICENSE). Developed and maintained by **Shikome Technology Limited**
+([@hashikome](https://github.com/hashikome)).
