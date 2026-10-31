@@ -35,6 +35,5 @@ the branch head.
 | `requiredValues` | Inputs that must equal these values on the application Stack |
 | `sharedInputs` | Inputs the application and migration Stacks must agree on |
 | `secretNameSuffixes` | Inputs that must look like secret names (default `_SECRET`) |
-| `previousApplication` | Optional: `compose` and `stack` of an older Stack to stop before replacing it |
 
 Stacks must be raw-source, local to the Dokploy host, with auto-deploy off.

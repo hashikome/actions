@@ -191,18 +191,6 @@ def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempt
     for key in config.get("sharedInputs", []):
         if line(app_env, key) != line(migration_env, key):
             raise ReleaseError(f"Application and migration disagree on {key}.")
-    previous = None
-    if config.get("previousApplication"):
-        settings = config["previousApplication"]
-        if settings["compose"] == config["application"]["compose"]:
-            raise ReleaseError("The previous application must be a distinct target.")
-        previous = api("compose.one", query={"composeId": settings["compose"]})
-        if (
-            stack_problem(previous, re.escape(settings["stack"]))
-            or line(environment(previous["env"], config, release, "application", root), "BACKEND_NETWORK")
-            != line(app_env, "BACKEND_NETWORK")
-        ):
-            raise ReleaseError("Unexpected previous application target.")
     api("registry.testRegistryById", {"registryId": release["registry"]})
     for part, target, env in (
         ("migration", migration, migration_env),
@@ -219,22 +207,6 @@ def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempt
                 "autoDeploy": False,
             },
         )
-        if part == "application" and previous:
-            # The migration is accepted; prevent duplicate routes and workers.
-            def active():
-                listing = api(
-                    "docker.getContainersByAppNameMatch", query={"appName": previous["appName"]}
-                )
-                return any(item.get("state") not in ("exited", "dead") for item in listing)
-
-            if active():
-                api("compose.stop", {"composeId": previous["composeId"]})
-            for _ in range(attempts):
-                if not active():
-                    break
-                sleep()
-            else:
-                raise ReleaseError("Previous application has not stopped; replacement refused.")
         api("compose.deploy", {"composeId": target["composeId"], "title": title})
         wait_for(api, target, title, config, release, part == "migration", sleep, attempts)
 

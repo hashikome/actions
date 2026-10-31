@@ -266,17 +266,6 @@ class ReleaseTest(unittest.TestCase):
         }
         self.assertIsNone(subject.application_service(container, "example-abc123", CONFIG, RELEASE))
 
-    def test_the_previous_application_stops_after_migration_before_replacement(self):
-        config = {**CONFIG, "previousApplication": {"compose": "previous", "stack": "example-old"}}
-        api = Dokploy(previous=True)
-        self.promote(api, config)
-        self.assertLess(api.calls.index("compose.deploy:migration"), api.calls.index("compose.stop:previous"))
-        self.assertLess(api.calls.index("compose.stop:previous"), api.calls.index("compose.deploy:application"))
-        stuck = Dokploy(previous=True, stops=False)
-        with self.assertRaises(subject.ReleaseError):
-            self.promote(stuck, config)
-        self.assertNotIn("compose.deploy:application", stuck.calls)
-
     def test_parses_images_strictly(self):
         self.assertEqual(subject.parse_images("A=one\n\n  B=two  \n"), {"A": "one", "B": "two"})
         for text in ("no separator", "A=one\nA=two"):
