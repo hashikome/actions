@@ -1,0 +1,30 @@
+name: Docker secrets
+description: Create a product's missing Docker secrets on its server from its GitHub secrets.
+inputs:
+  config:
+    description: A JSON map of Docker secret name to GitHub secret name, relative to the repository root.
+    default: deploy/docker-secrets.json
+  values:
+    description: The caller's secrets, as `toJSON(secrets)`.
+    required: true
+  ssh-key:
+    description: Private key of the server's deploy user.
+    required: true
+  ssh-target:
+    description: user@host of the server.
+    required: true
+  ssh-host-key:
+    description: The server's known_hosts line.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Create missing Docker secrets
+      shell: bash
+      env:
+        SECRETS_CONFIG: ${{ inputs.config }}
+        SECRET_VALUES: ${{ inputs.values }}
+        SSH_KEY: ${{ inputs.ssh-key }}
+        SSH_TARGET: ${{ inputs.ssh-target }}
+        SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
+      run: python3 "$GITHUB_ACTION_PATH/ensure_secrets.py"

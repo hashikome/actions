@@ -1,7 +1,7 @@
 # hashikome/actions
 
 Shared GitHub Actions for Hashikome's products: GitHub's `actions` organisation, for Hashikome. Each
-action is one folder, called as `hashikome/actions/<name>@v1.0.1`.
+action is one folder, called as `hashikome/actions/<name>@v1.1.0`.
 
 This repository is public and holds logic only. Credentials and anything specific to a product
 (targets, services, hosts) stay in that product's repository.
@@ -9,12 +9,14 @@ This repository is public and holds logic only. Credentials and anything specifi
 | Action | What it does |
 | --- | --- |
 | [`dokploy-release`](dokploy-release/README.md) | Migrate, verify, then promote immutable images through Dokploy |
+| [`docker-secrets`](docker-secrets/README.md) | Create a product's missing Docker secrets on its server from its GitHub secrets |
 
-Run the tests with `python3 -m unittest discover -s dokploy-release`.
+Run the tests with `python3 -m unittest discover -s dokploy-release` and
+`python3 -m unittest discover -s docker-secrets`.
 
 ## Versions
 
-One version covers every action in this repository. Products pin an exact version such as `@v1.0.1`,
+One version covers every action in this repository. Products pin an exact version such as `@v1.1.0`,
 or a full commit for a change not published yet, never a moving tag or `main`. A change reaches a
 product when that product edits its pin. There are no moving major tags and no automated updates.
 

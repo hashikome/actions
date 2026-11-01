@@ -55,6 +55,11 @@ def environment(previous, config, release, part, root="."):
         if not match or match[1] not in allowed or match[1] in values:
             raise ReleaseError("Unexpected or duplicate deployment input; configuration withheld.")
         values[match[1]] = match[2]
+    # Fixed inputs live in the product's repository and win over stored values.
+    unknown = set(config.get("inputs", {})) - allowed
+    if unknown:
+        raise ReleaseError("Unexpected or duplicate deployment input; configuration withheld.")
+    values.update(config.get("inputs", {}))
     values.update(release["images"])
     values.update(
         RELEASE_SHA=release["revision"], RELEASE_ATTEMPT=release["attempt"], APP_REPLICAS="1"

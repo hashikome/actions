@@ -79,6 +79,21 @@ def migration_container():
     }
 
 
+class FixedInputTests(unittest.TestCase):
+    def test_inputs_in_the_repository_win_over_stored_values(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "app.yml").write_text(APP_MANIFEST)
+            config = {**CONFIG, "inputs": {"BACKEND_NETWORK": "fixed"}}
+            env = subject.environment(STORED, config, RELEASE, "application", root)
+        self.assertIn("BACKEND_NETWORK=fixed\n", env)
+        self.assertNotIn("BACKEND_NETWORK=data\n", env)
+
+    def test_refuses_an_input_the_configuration_does_not_allow(self):
+        config = {**CONFIG, "inputs": {"SURPRISE": "value"}}
+        with self.assertRaises(subject.ReleaseError):
+            subject.environment(STORED, config, RELEASE, "application", ".")
+
+
 class Dokploy:
     """A fake Dokploy that records every call."""
 

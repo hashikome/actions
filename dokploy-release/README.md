@@ -6,7 +6,7 @@ There is no automatic rollback.
 
 ```yaml
 - uses: actions/checkout@<sha>
-- uses: hashikome/actions/dokploy-release@v1.0.1
+- uses: hashikome/actions/dokploy-release@v1.1.0
   with:
     images: |
       API_IMAGE=${{ needs.image.outputs.api }}
@@ -33,6 +33,7 @@ the branch head.
 | `images` | Each image's env key and GHCR package |
 | `allowedInputs` | Every other env key the Stacks may hold; anything else stops the release |
 | `requiredValues` | Inputs that must equal these values on the application Stack |
+| `inputs` | Optional: fixed non-secret values, such as a network or secret names. They win over Dokploy's stored values, so a new server needs fewer of those |
 | `sharedInputs` | Inputs the application and migration Stacks must agree on |
 | `secretNameSuffixes` | Inputs that must look like secret names (default `_SECRET`) |
 
