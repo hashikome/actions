@@ -1,0 +1,18 @@
+name: SSH agent
+description: Start ssh-agent for the rest of the job with the deploy key loaded and the server's host key trusted.
+inputs:
+  ssh-key:
+    description: Private key of the server's deploy user.
+    required: true
+  ssh-host-key:
+    description: The server's known_hosts line.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Start ssh-agent
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
+      run: bash "$GITHUB_ACTION_PATH/start_agent.sh"

@@ -10,15 +10,18 @@ This repository is public and holds logic only. Credentials and anything specifi
 | --- | --- |
 | [`dokploy-release`](dokploy-release/README.md) | Migrate, verify, then promote immutable images through Dokploy |
 | [`docker-secrets`](docker-secrets/README.md) | Create a product's missing Docker secrets on its server from its GitHub secrets |
+| [`ssh-agent`](ssh-agent/README.md) | Load the deploy key into ssh-agent and trust the server's pinned host key |
 
-Run the tests with `python3 -m unittest discover -s dokploy-release` and
-`python3 -m unittest discover -s docker-secrets`.
+Run the tests with `python3 -m unittest discover -s dokploy-release`,
+`python3 -m unittest discover -s docker-secrets` and
+`python3 -m unittest discover -s ssh-agent`.
 
 ## Versions
 
-One version covers every action in this repository. Products pin an exact version such as `@v1.1.0`,
-or a full commit for a change not published yet, never a moving tag or `main`. A change reaches a
-product when that product edits its pin. There are no moving major tags and no automated updates.
+One version covers every action in this repository. Products pin either a released version such as
+`@v1.1.0` (releases are immutable, so the tag never moves) or a full commit, released or not. A commit
+lets a product try a change before it is released. Never pin a moving tag or `main`. A change reaches
+a product when that product edits its pin. There are no moving major tags and no automated updates.
 
 Releasing: bump the patch for a fix, the minor for something new, and the major for anything a caller
 must change. After `main` is green, run `gh release create v1.0.1 --target main --generate-notes`. Published
