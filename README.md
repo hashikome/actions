@@ -12,9 +12,7 @@ This repository is public and holds logic only. Credentials and anything specifi
 | [`docker-secrets`](docker-secrets/README.md) | Create a product's missing Docker secrets on its server from its GitHub secrets |
 | [`ssh-agent`](ssh-agent/README.md) | Load the deploy key into ssh-agent and trust the server's pinned host key |
 
-Run the tests with `python3 -m unittest discover -s dokploy-release`,
-`python3 -m unittest discover -s docker-secrets` and
-`python3 -m unittest discover -s ssh-agent`.
+Run the tests with `uvx pytest==9.2.0 dokploy-release docker-secrets ssh-agent`.
 
 ## Versions
 
