@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Create a product's missing Docker secrets. A Docker secret never changes: a new value takes a
-new versioned name, so one that exists is left alone and its value isn't needed."""
+"""Create a product's missing Docker secrets from its encrypted file in hashikome/secrets. A Docker
+secret never changes: a new value takes a new versioned name, so one that exists is left alone."""
 import json
 import os
 from pathlib import Path
@@ -17,21 +17,39 @@ class SecretsError(Exception):
     """A safe message: never a value."""
 
 
-def plan(wanted, existing, values):
+def plan(product, values, existing):
     """The secrets to create, as {docker name: value}."""
-    for name in wanted:
-        if not NAME.fullmatch(name):
-            raise SecretsError(f"Expected <product>_<name>_YYYYMMDD_vN, not {name}.")
-    missing = {name: source for name, source in wanted.items() if name not in existing}
-    absent = sorted(source for source in missing.values() if not values.get(source))
-    if absent:
-        raise SecretsError("Missing GitHub secrets: " + ", ".join(absent))
-    return {name: values[source] for name, source in missing.items()}
+    for name, value in values.items():
+        if not NAME.fullmatch(name) or not name.startswith(f"{product}_"):
+            raise SecretsError(f"Expected {product}_<name>_YYYYMMDD_vN, not {name}.")
+        if not isinstance(value, str) or not value:
+            raise SecretsError(f"{name} has no value.")
+    return {name: value for name, value in values.items() if name not in existing}
+
+
+def decrypt(sops, path):
+    """The file's values, decrypted in memory and masked in the job's log before anything prints."""
+    if not path.is_file():
+        raise SecretsError(f"No {path.parent.name}/{path.name} in hashikome/secrets.")
+    try:
+        text = subprocess.run(
+            [sops, "decrypt", "--output-type", "json", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        raise SecretsError(f"Could not decrypt {path.parent.name}/{path.name}.") from None
+    values = json.loads(text)
+    values.pop("sops", None)
+    for value in values.values():
+        for line in str(value).splitlines():
+            if line.strip():
+                print(f"::add-mask::{line}")
+    return values
 
 
 def main():
-    wanted = json.loads(Path(os.environ["SECRETS_CONFIG"]).read_text())
-    values = json.loads(os.environ["SECRET_VALUES"])
+    product = os.environ["PRODUCT"]
+    values = decrypt(os.environ["SOPS"], Path(os.environ["SECRETS_DIR"], product, "docker-secrets.json"))
     with tempfile.TemporaryDirectory() as directory:
         key, hosts = Path(directory, "key"), Path(directory, "hosts")
         key.write_text(os.environ["SSH_KEY"].rstrip("\n") + "\n")
@@ -48,11 +66,11 @@ def main():
             ).stdout
 
         existing = set(remote("docker secret ls --format '{{.Name}}'").split())
-        created = plan(wanted, existing, values)
+        created = plan(product, values, existing)
         for name, value in created.items():
             remote(f"docker secret create {shlex.quote(name)} -", value)
             print("created", name)
-    print(f"{len(wanted)} Docker secrets in place.")
+    print(f"{len(values)} Docker secrets in place.")
 
 
 if __name__ == "__main__":
