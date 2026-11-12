@@ -4,9 +4,10 @@ Promotes one release through Dokploy: a one-shot migration Stack first, if the p
 the application Stack. A migration that fails, or can't be proven for this exact attempt, never
 touches the application.
 
-Rollback is the platform's, not the product's: Swarm puts back a service whose new tasks don't become
-healthy (each service's `update_config: failure_action: rollback` and a health check), and a release
-found wrong later is undone by releasing the previous revision. A product that checks its live site
+Rollback is Dokploy's, not the product's. On Docker Swarm, a service whose new tasks don't become
+healthy is put back during the deploy (each service's `update_config: failure_action: rollback` and a
+health check). A release found wrong later is undone by redeploying the previous revision through
+Dokploy: its Rollback button where it offers one, otherwise by re-running that revision's release. A product that checks its live site
 after the release does so in a step of its own after this action; a failure there fails the run.
 
 ```yaml

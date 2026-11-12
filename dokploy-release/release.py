@@ -3,9 +3,9 @@
 application Stack.
 
 The sequence lives here; everything specific to a product comes from its release configuration.
-A failed migration never touches the application. Rollback is the platform's: Swarm puts back a
-service whose new tasks don't become healthy (each Stack's `update_config`), and a release found wrong
-later is undone by releasing the previous revision. Standard library only, so no product's toolchain
+A failed migration never touches the application. Rollback is Dokploy's, on Docker Swarm: a service
+whose new tasks don't become healthy is put back during the deploy (each Stack's `update_config`), and
+a release found wrong later is undone by redeploying the previous revision through Dokploy. Standard library only, so no product's toolchain
 is needed.
 """
 
