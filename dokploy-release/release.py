@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Promote a product release through Dokploy: migration Stack first, then the application Stack.
+"""Promote a product release through Dokploy: its migration Stack first, if it has one, then the
+application Stack.
 
 The sequence lives here; everything specific to a product comes from its release configuration.
-A failed migration never touches the application, and there is no automatic rollback. Standard
-library only, so no product's toolchain is needed.
+A failed migration never touches the application. Rollback is the platform's: Swarm puts back a
+service whose new tasks don't become healthy (each Stack's `update_config`), and a release found wrong
+later is undone by releasing the previous revision. Standard library only, so no product's toolchain
+is needed.
 """
 
 import json
@@ -35,8 +38,9 @@ def validate(config, release):
         pattern = rf"{re.escape(package)}:{release['revision']}@sha256:[a-f0-9]{{64}}"
         if not re.fullmatch(pattern, release["images"][key]):
             raise ReleaseError(f"{key} must be this revision by digest in the product's package.")
-    application, migration = config["application"]["compose"], config["migration"]["compose"]
-    if not application or not migration or application == migration:
+    application = config["application"]["compose"]
+    migration = config["migration"]["compose"] if "migration" in config else None
+    if not application or migration == "" or application == migration:
         raise ReleaseError("Application and migration require distinct Dokploy targets.")
 
 
@@ -166,7 +170,7 @@ def wait_for(api, target, title, config, release, migration, sleep, attempts):
             ):
                 return
         sleep()
-    raise ReleaseError("Release acceptance timed out; no automatic schema or image rollback.")
+    raise ReleaseError("Release acceptance timed out; Swarm keeps or restores the previous tasks.")
 
 
 def stack_problem(target, pattern):
@@ -181,26 +185,23 @@ def stack_problem(target, pattern):
 
 def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempts=120):
     validate(config, release)
-    application = api("compose.one", query={"composeId": config["application"]["compose"]})
-    migration = api("compose.one", query={"composeId": config["migration"]["compose"]})
-    if stack_problem(application, config["application"]["stack"]) or stack_problem(
-        migration, config["migration"]["stack"]
-    ):
+    # A product whose application migrates itself at start (a single-writer database) has no
+    # migration Stack: the application is then the only part.
+    parts = [part for part in ("migration", "application") if part in config]
+    targets = {part: api("compose.one", query={"composeId": config[part]["compose"]}) for part in parts}
+    if any(stack_problem(targets[part], config[part]["stack"]) for part in parts):
         raise ReleaseError("Expected dedicated local raw-source Stacks with auto-deploy disabled.")
-    app_env = environment(application["env"], config, release, "application", root)
-    migration_env = environment(migration["env"], config, release, "migration", root)
+    envs = {part: environment(targets[part]["env"], config, release, part, root) for part in parts}
 
     def line(env, key):
         return next((item for item in env.splitlines() if item.startswith(f"{key}=")), None)
 
-    for key in config.get("sharedInputs", []):
-        if line(app_env, key) != line(migration_env, key):
-            raise ReleaseError(f"Application and migration disagree on {key}.")
+    if "migration" in envs:
+        for key in config.get("sharedInputs", []):
+            if line(envs["application"], key) != line(envs["migration"], key):
+                raise ReleaseError(f"Application and migration disagree on {key}.")
     api("registry.testRegistryById", {"registryId": release["registry"]})
-    for part, target, env in (
-        ("migration", migration, migration_env),
-        ("application", application, app_env),
-    ):
+    for part, target, env in ((part, targets[part], envs[part]) for part in parts):
         title = f"{config['title']} {part} {release['revision']} ({release['attempt']})"
         api(
             "compose.update",
@@ -275,7 +276,8 @@ def main():
         "registry": os.environ.get("DOKPLOY_REGISTRY_ID", ""),
     }
     promote(dokploy(config["dokployUrl"], key), config, release)
-    print(f"{config['title']} migration completed and application tasks converged.")
+    done = "migration completed and application" if "migration" in config else "application"
+    print(f"{config['title']} {done} tasks converged.")
 
 
 if __name__ == "__main__":
@@ -286,5 +288,5 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception:
         # Anything unforeseen could carry a response body: name the failure, not its content.
-        print("Release failed unexpectedly; details withheld. No rollback was attempted.", file=sys.stderr)
+        print("Release failed unexpectedly; details withheld.", file=sys.stderr)
         sys.exit(1)

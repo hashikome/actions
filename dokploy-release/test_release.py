@@ -240,6 +240,15 @@ def test_migration_comes_first_then_exact_convergence(root):
     ]
 
 
+def test_without_a_migration_the_application_is_the_only_part(root):
+    single = copy.deepcopy(CONFIG)
+    del single["migration"]
+    api = Dokploy()
+    promote(root, api, single)
+    assert not any(call.endswith(":migration") for call in api.calls)
+    assert [call for call in api.calls if call.startswith("compose.deploy:")] == ["compose.deploy:application"]
+
+
 def test_a_shared_input_must_agree(root):
     api = Dokploy()
     original = api.__call__

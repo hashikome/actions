@@ -1,8 +1,13 @@
 # dokploy-release
 
-Promotes one release through Dokploy: a one-shot migration Stack first, then the application Stack.
-A migration that fails, or can't be proven for this exact attempt, never touches the application.
-There is no automatic rollback.
+Promotes one release through Dokploy: a one-shot migration Stack first, if the product has one, then
+the application Stack. A migration that fails, or can't be proven for this exact attempt, never
+touches the application.
+
+Rollback is the platform's, not the product's: Swarm puts back a service whose new tasks don't become
+healthy (each service's `update_config: failure_action: rollback` and a health check), and a release
+found wrong later is undone by releasing the previous revision. A product that checks its live site
+after the release does so in a step of its own after this action; a failure there fails the run.
 
 ```yaml
 - uses: actions/checkout@<sha>
@@ -28,7 +33,7 @@ the branch head.
 | `title` | Names deployments in Dokploy |
 | `dokployUrl` | The Dokploy origin |
 | `application` | `compose` (ID), `stack` (pattern for its name), `manifest` (path) |
-| `migration` | The same, plus `service`, `image` (a key of `images`) and `command` (the exact entrypoint) |
+| `migration` | Optional: the same, plus `service`, `image` (a key of `images`) and `command` (the exact entrypoint). Leave it out when the application migrates itself at start |
 | `services` | Each service key, its `image`, and `healthcheck: false` if it has none |
 | `images` | Each image's env key and GHCR package |
 | `allowedInputs` | Every other env key the Stacks may hold; anything else stops the release |
