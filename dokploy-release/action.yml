@@ -16,6 +16,17 @@ inputs:
   github-token:
     description: Reads the branch head, to refuse a superseded revision.
     required: true
+  accept:
+    description: >-
+      Optional: the product's own check of the live release, a shell command run once every service is
+      released (its step's env reaches it). A non-zero exit fails the release.
+    default: ""
+  rollback:
+    description: >-
+      "true" puts the application's previous release back when this one doesn't hold: Swarm rolled it
+      back or paused it, it didn't converge, or the acceptance refused it. Leave it off where a
+      migration makes the previous application unsafe on the new schema.
+    default: "false"
 runs:
   using: composite
   steps:
@@ -27,4 +38,6 @@ runs:
         DOKPLOY_API_KEY: ${{ inputs.dokploy-api-key }}
         DOKPLOY_REGISTRY_ID: ${{ inputs.registry-id }}
         GH_TOKEN: ${{ inputs.github-token }}
+        RELEASE_ACCEPT: ${{ inputs.accept }}
+        RELEASE_ROLLBACK: ${{ inputs.rollback }}
       run: python3 "$GITHUB_ACTION_PATH/release.py"

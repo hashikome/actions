@@ -3,9 +3,9 @@
 application Stack.
 
 The sequence lives here; everything specific to a product comes from its release configuration.
-A failed migration never touches the application. Rollback is Dokploy's, on Docker Swarm: a service
-whose new tasks don't become healthy is put back during the deploy (each Stack's `update_config`), and
-a release found wrong later is undone by redeploying the previous revision through Dokploy. Standard library only, so no product's toolchain
+A failed migration never touches the application. Rollback is the platform's: Swarm puts back a service
+whose new tasks don't become healthy (each Stack's `update_config`), and with `rollback` a release that
+doesn't hold (see `Failed`) has the application's previous Stack restored in Dokploy and deployed. Standard library only, so no product's toolchain
 is needed.
 """
 
@@ -35,6 +35,12 @@ class ReleaseError(Exception):
 
 class Unanswered(ReleaseError):
     """A Dokploy call that didn't succeed: while a Stack deploys, a read may be retried."""
+
+
+class Failed(ReleaseError):
+    """The release reached the server and didn't hold: Swarm rolled it back or paused it, it never
+    converged, or the product's acceptance refused it. A product that opts in gets its previous
+    release back (`rollback`)."""
 
 
 def validate(config, release):
@@ -127,10 +133,10 @@ def application_service(container, app_name, config, release):
     name = (runtime.get("Labels") or {}).get(SWARM_SERVICE) or ""
     service = name[len(app_name) + 1 :] if name.startswith(f"{app_name}_") else ""
     settings = config["services"].get(service)
-    if (
-        not settings
-        or state.get("Status") != "running"
-        or runtime.get("Image") != release["images"][settings["image"]]
+    if not settings or state.get("Status") != "running":
+        return None
+    if release.get("attempt") and (
+        runtime.get("Image") != release["images"].get(settings["image"])
         or f"RELEASE_ATTEMPT={release['attempt']}" not in (runtime.get("Env") or [])
     ):
         return None
@@ -139,15 +145,18 @@ def application_service(container, app_name, config, release):
     return service
 
 
-def verdicts(api, app_name, since, seen):
-    """Each service's latest Swarm update state since the deploy began, added to `seen`."""
+def verdicts(api, app_name, watch):
+    """Each service's latest Swarm update state after `watch["since"]` (event nanoseconds), into
+    `watch["seen"]`; `watch["last"]` keeps the newest event read, so a rollback watches only its own."""
     result = api("docker.getEvents", query={"minutes": 1}) or {}
     for event in sorted(result.get("events") or [], key=lambda e: e.get("timeNano") or 0):
         attributes = (event.get("Actor") or {}).get("Attributes") or {}
         name, state = attributes.get("name") or "", attributes.get("updatestate.new")
-        if event.get("Type") == "service" and state and name.startswith(f"{app_name}_") and event.get("time", 0) >= since:
-            seen[name[len(app_name) + 1 :]] = state
-    return seen
+        nano = event.get("timeNano") or 0
+        if event.get("Type") == "service" and state and name.startswith(f"{app_name}_") and nano > watch["since"]:
+            watch["seen"][name[len(app_name) + 1 :]] = state
+            watch["last"] = max(watch.get("last", 0), nano)
+    return watch["seen"]
 
 
 def summary(lines):
@@ -159,11 +168,12 @@ def summary(lines):
             out.write("\n".join(lines) + "\n")
 
 
-def wait_for(api, target, title, config, release, migration, sleep, attempts, since=0):
-    seen, failures = {}, 0
+def wait_for(api, target, title, config, release, migration, sleep, attempts, watch=None):
+    watch = watch if watch is not None else {"since": 0, "seen": {}}
+    failures = 0
     for _ in range(attempts):
         try:
-            if poll(api, target, title, config, release, migration, since, seen):
+            if poll(api, target, title, config, release, migration, watch):
                 return
             failures = 0
         except Unanswered:  # a read Dokploy couldn't answer is retried; a verdict or a refusal is final
@@ -171,23 +181,24 @@ def wait_for(api, target, title, config, release, migration, sleep, attempts, si
             if failures >= POLL_FAILURES:
                 raise
         sleep()
-    raise ReleaseError("Release acceptance timed out; Swarm keeps or restores the previous tasks.")
+    raise Failed("The release didn't converge in time.")
 
 
-def poll(api, target, title, config, release, migration, since, seen):
+def poll(api, target, title, config, release, migration, watch):
     """One look at the deploy: True once it is released, False to look again; raises on a verdict."""
+    seen = watch["seen"]
     if not migration:
-        verdicts(api, target["appName"], since, seen)
+        verdicts(api, target["appName"], watch)
         back = sorted(s for s, state in seen.items() if state in ROLLED_BACK)
         if back:
-            summary([f"**Rolled back by Swarm:** {', '.join(back)}; the previous release keeps running."])
-            raise ReleaseError(f"Swarm rolled back {', '.join(back)}; the previous release keeps running.")
+            summary([f"**Rolled back by Swarm:** {', '.join(back)}."])
+            raise Failed(f"Swarm rolled back {', '.join(back)}; its previous tasks run, but Dokploy still holds this release.")
         if any(state in STOPPED for state in seen.values()):
-            raise ReleaseError("Swarm paused the update; inspect the services.")
+            raise Failed("Swarm paused the update.")
     deployments = api("deployment.allByCompose", query={"composeId": target["composeId"]})
     deployment = next((item for item in deployments if item["title"] == title), None)
     if deployment and deployment["status"] == "error":
-        raise ReleaseError("Dokploy deployment failed; inspect before retrying.")
+        raise Failed("Dokploy's deployment failed.")
     if deployment and deployment["status"] == "done":
         # Dokploy's stack listing filters desired-state=running. The all-state listing
         # includes completed migrations, so verify exact Swarm labels below.
@@ -238,7 +249,11 @@ def stack_problem(target, pattern):
     )
 
 
-def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempts=120):
+def promote(
+    api, config, release, root=".", sleep=lambda: time.sleep(5), attempts=120, accept=None, rollback=False
+):
+    """Deploy the release; with `accept`, the product's own check after it converges. With `rollback`,
+    a release that doesn't hold (see `Failed`) puts the application's previous release back."""
     validate(config, release)
     # A product whose application migrates itself at start (a single-writer database) has no
     # migration Stack: the application is then the only part.
@@ -256,21 +271,74 @@ def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempt
             if line(envs["application"], key) != line(envs["migration"], key):
                 raise ReleaseError(f"Application and migration disagree on {key}.")
     api("registry.testRegistryById", {"registryId": release["registry"]})
-    for part, target, env in ((part, targets[part], envs[part]) for part in parts):
+    # what runs now, kept to put back: the application Stack's file and inputs in Dokploy
+    application = targets["application"]
+    kept = {key: application.get(key) for key in ("composeFile", "env", "command")}
+    for part in parts:
+        target = targets[part]
         title = f"{config['title']} {part} {release['revision']} ({release['attempt']})"
-        api(
-            "compose.update",
-            {
-                "composeId": target["composeId"],
-                "composeFile": manifest_text(config, part, root),
-                "env": env,
-                "command": "",
-                "autoDeploy": False,
-            },
-        )
-        since = int(time.time()) - 60  # the deploy's events, allowing for the runner's and server's clocks
-        api("compose.deploy", {"composeId": target["composeId"], "title": title})
-        wait_for(api, target, title, config, release, part == "migration", sleep, attempts, since)
+        watch = deploy(api, target, manifest_text(config, part, root), envs[part], title)
+        if part == "migration":
+            wait_for(api, target, title, config, release, True, sleep, attempts, watch)
+            continue
+        try:
+            wait_for(api, target, title, config, release, False, sleep, attempts, watch)
+            if accept and not accept():
+                raise Failed("The product's acceptance refused the release.")
+        except Failed as error:
+            if not rollback or not (kept["composeFile"] or "").strip():
+                raise  # nothing to put back: a product that hasn't opted in, or a first release
+            back = restore(api, config, application, kept, release, watch, sleep, attempts)
+            summary([f"**Rolled back** to {back}: {error}"])
+            raise ReleaseError(f"{error} Rolled back to {back}.") from error
+
+
+def deploy(api, target, manifest, env, title):
+    """Give Dokploy the Stack's file and inputs and deploy them; what to watch the deploy by."""
+    api(
+        "compose.update",
+        {"composeId": target["composeId"], "composeFile": manifest, "env": env, "command": "", "autoDeploy": False},
+    )
+    # the deploy's events, allowing for the runner's and the server's clocks
+    watch = {"since": (int(time.time()) - 60) * 10**9, "seen": {}}
+    api("compose.deploy", {"composeId": target["composeId"], "title": title})
+    return watch
+
+
+def previous(env, config):
+    """The release a Stack's stored inputs describe: its revision, attempt and images, as far as known."""
+    values = dict(line.split("=", 1) for line in env.splitlines() if "=" in line and not line.startswith("#"))
+    return {
+        "revision": values.get("RELEASE_SHA", ""),
+        "attempt": values.get("RELEASE_ATTEMPT", ""),
+        "images": {key: values.get(key, "") for key in config["images"]},
+    }
+
+
+def restore(api, config, target, kept, release, failed, sleep, attempts):
+    """Put back the application Stack as it was before this release, deploy it, and wait until Swarm
+    has it running and healthy. Returns the revision put back."""
+    before = previous(kept["env"] or "", config)
+    back = before["revision"][:12] or "the previous release"
+    title = f"{config['title']} rollback to {back} after {release['revision'][:12]} ({release['attempt']})"
+    api(
+        "compose.update",
+        {
+            "composeId": target["composeId"],
+            "composeFile": kept["composeFile"],
+            "env": kept["env"],
+            "command": kept["command"] or "",
+            "autoDeploy": False,
+        },
+    )
+    # only this deploy's events: not the failed one's, Swarm's own rollback included
+    watch = {"since": max(failed.get("last", 0), failed["since"]), "seen": {}}
+    api("compose.deploy", {"composeId": target["composeId"], "title": title})
+    try:
+        wait_for(api, target, title, config, before, False, sleep, attempts, watch)
+    except Failed as error:
+        raise ReleaseError(f"Putting back {back} failed too ({error}); inspect the Stack.") from error
+    return back
 
 
 def parse_images(text):
@@ -331,7 +399,14 @@ def main():
         "images": parse_images(os.environ.get("RELEASE_IMAGES", "")),
         "registry": os.environ.get("DOKPLOY_REGISTRY_ID", ""),
     }
-    promote(dokploy(config["dokployUrl"], key), config, release)
+    command = os.environ.get("RELEASE_ACCEPT", "").strip()
+
+    def accept():
+        print(f"Acceptance: {command}", flush=True)
+        return subprocess.run(command, shell=True).returncode == 0
+
+    rollback = os.environ.get("RELEASE_ROLLBACK", "false") == "true"
+    promote(dokploy(config["dokployUrl"], key), config, release, accept=accept if command else None, rollback=rollback)
     done = "migration completed and application" if "migration" in config else "application"
     print(f"{config['title']} {done} tasks converged.")
 

@@ -10,6 +10,13 @@ ATTEMPT = "123-2"
 API_IMAGE = f"ghcr.io/hashikome/example/api:{REVISION}@sha256:{'b' * 64}"
 WEB_IMAGE = f"ghcr.io/hashikome/example/web:{REVISION}@sha256:{'c' * 64}"
 COMMAND = ["dist/migrate.js"]
+PREVIOUS_ATTEMPT = "120-1"
+OLD_API = f"ghcr.io/hashikome/example/api:{'e' * 40}@sha256:{'f' * 64}"
+OLD_WEB = f"ghcr.io/hashikome/example/web:{'e' * 40}@sha256:{'9' * 64}"
+RUNNING = (
+    f"PUBLIC_HOST=example.com\nBACKEND_NETWORK=data\nAUTH_SECRET=auth_v1\nAPI_IMAGE={OLD_API}\n"
+    f"WEB_IMAGE={OLD_WEB}\nRELEASE_SHA={'e' * 40}\nRELEASE_ATTEMPT={PREVIOUS_ATTEMPT}\n"
+)
 APP_MANIFEST = "image: ${API_IMAGE:?x}\nweb: ${WEB_IMAGE:?x}\nhost: ${PUBLIC_HOST:?x}\n" \
     "net: ${BACKEND_NETWORK:?x}\nsecret: ${AUTH_SECRET:?x}\nattempt: ${RELEASE_ATTEMPT}\n" \
     "optional: ${ANALYTICS_TOKEN:-}\n"
@@ -98,7 +105,8 @@ class Dokploy:
 
     def __init__(self, outcome="complete", previous=False, stops=True, swarm=None):
         self.outcome, self.old_running, self.stops = outcome, previous, stops
-        self.calls, self.titles = [], {}
+        self.calls, self.titles, self.updates, self.deploys = [], {}, [], []
+        self.attempt = ATTEMPT
         # Swarm's update states, as docker events: service -> states in order
         self.swarm = swarm if swarm is not None else {s: ["updating", "completed"] for s in ("api", "web", "worker")}
 
@@ -108,12 +116,22 @@ class Dokploy:
         if operation == "compose.one":
             if query["composeId"] == "previous":
                 return {**target(False), "composeId": "previous", "appName": "example-old"}
-            return target(query["composeId"] == "migration")
+            found = target(query["composeId"] == "migration")
+            if query["composeId"] == "application":
+                found.update(composeFile="services: {}  # running", env=RUNNING)
+            return found
         if operation == "compose.stop":
             self.old_running = not self.stops
             return {}
+        if operation == "compose.update":
+            self.updates.append(payload)
+            return {}
         if operation == "compose.deploy":
             self.titles[payload["composeId"]] = payload["title"]
+            self.deploys.append(payload["title"])
+            if "rollback to" in payload["title"]:
+                self.swarm = {}  # the previous release deploys cleanly
+                self.attempt = PREVIOUS_ATTEMPT
             return {}
         if operation == "docker.getEvents":
             events = [
@@ -121,7 +139,7 @@ class Dokploy:
                     "Type": "service",
                     "Action": "update",
                     "time": 2**40,
-                    "timeNano": i,
+                    "timeNano": 2**40 * 10**9 + i,
                     "Actor": {"Attributes": {"name": f"example-abc123_{service}", "updatestate.new": state}},
                 }
                 for service, states in self.swarm.items()
@@ -153,8 +171,10 @@ class Dokploy:
                 state["Health"] = {"Status": "healthy"}
             return {
                 "Config": {
-                    "Image": WEB_IMAGE if service == "web" else API_IMAGE,
-                    "Env": [f"RELEASE_ATTEMPT={ATTEMPT}"],
+                    "Image": (WEB_IMAGE if service == "web" else API_IMAGE)
+                    if self.attempt == ATTEMPT
+                    else (OLD_WEB if service == "web" else OLD_API),
+                    "Env": [f"RELEASE_ATTEMPT={self.attempt}"],
                     "Labels": {subject.SWARM_SERVICE: f"example-abc123_{service}"},
                 },
                 "State": state,
@@ -266,13 +286,13 @@ def test_without_a_migration_the_application_is_the_only_part(root):
 
 def test_a_release_swarm_rolled_back_says_so(root):
     api = Dokploy(swarm={"api": ["updating", "rollback_started", "rollback_completed"], "web": ["completed"]})
-    with pytest.raises(subject.ReleaseError, match="rolled back api; the previous release keeps running"):
+    with pytest.raises(subject.ReleaseError, match="rolled back api; its previous tasks run, but Dokploy still holds this release"):
         promote(root, api)
 
 
 def test_released_only_once_swarm_completes_every_update(root):
     still = Dokploy(swarm={"api": ["updating"], "web": ["completed"], "worker": ["completed"]})
-    with pytest.raises(subject.ReleaseError, match="timed out"):
+    with pytest.raises(subject.Failed, match="didn't converge"):
         promote(root, still)
     promote(root, Dokploy())  # every service completed
     promote(root, Dokploy(swarm={}))  # a first deploy creates services: no update to wait for
@@ -301,6 +321,31 @@ def test_a_read_dokploy_cannot_answer_for_a_moment_is_retried(root):
 
     with pytest.raises(subject.Unanswered):
         subject.promote(down, CONFIG, RELEASE, root, lambda: None, 20)
+
+
+def test_a_release_that_does_not_hold_puts_the_previous_one_back(root):
+    for cause, api, accept in (
+        ("Swarm rolled back api", Dokploy(swarm={"api": ["updating", "rollback_completed"]}), None),
+        ("acceptance refused", Dokploy(), lambda: False),
+    ):
+        with pytest.raises(subject.ReleaseError, match=f"{cause}.*Rolled back to eeeeeeeeeeee"):
+            subject.promote(api, CONFIG, RELEASE, root, lambda: None, 3, accept=accept, rollback=True)
+        restored = api.updates[-1]
+        assert (restored["composeFile"], restored["env"]) == ("services: {}  # running", RUNNING)
+        assert api.deploys[-1].startswith("example. rollback to eeeeeeeeeeee after aaaaaaaaaaaa")
+
+
+def test_without_rollback_a_failed_release_is_left_for_the_owner(root):
+    api = Dokploy()
+    with pytest.raises(subject.Failed, match="acceptance refused"):
+        subject.promote(api, CONFIG, RELEASE, root, lambda: None, 3, accept=lambda: False)
+    assert not any("rollback to" in title for title in api.deploys)
+
+
+def test_an_accepted_release_stays(root):
+    api, asked = Dokploy(), []
+    subject.promote(api, CONFIG, RELEASE, root, lambda: None, 3, accept=lambda: asked.append(1) or True, rollback=True)
+    assert asked == [1] and not any("rollback to" in title for title in api.deploys)
 
 
 def test_a_shared_input_must_agree(root):
