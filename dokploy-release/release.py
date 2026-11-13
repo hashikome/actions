@@ -21,6 +21,10 @@ from urllib.parse import urlencode
 SWARM_SERVICE = "com.docker.swarm.service.name"
 SWARM_TASK = "com.docker.swarm.task.id"
 RELEASE_KEYS = {"RELEASE_SHA", "RELEASE_ATTEMPT", "APP_REPLICAS"}
+# Swarm's verdict on a service's update, from its events (`updatestate.new`): Docker keeps only the
+# last 256 events, so they are collected while waiting, not asked for afterwards.
+ROLLED_BACK = {"rollback_started", "rollback_completed", "rollback_paused"}
+STOPPED = {"paused"}
 
 
 class ReleaseError(Exception):
@@ -129,8 +133,36 @@ def application_service(container, app_name, config, release):
     return service
 
 
-def wait_for(api, target, title, config, release, migration, sleep, attempts):
+def verdicts(api, app_name, since, seen):
+    """Each service's latest Swarm update state since the deploy began, added to `seen`."""
+    result = api("docker.getEvents", query={"minutes": 5}) or {}
+    for event in sorted(result.get("events") or [], key=lambda e: e.get("timeNano") or 0):
+        attributes = (event.get("Actor") or {}).get("Attributes") or {}
+        name, state = attributes.get("name") or "", attributes.get("updatestate.new")
+        if event.get("Type") == "service" and state and name.startswith(f"{app_name}_") and event.get("time", 0) >= since:
+            seen[name[len(app_name) + 1 :]] = state
+    return seen
+
+
+def summary(lines):
+    """The verdict in the run's summary, when GitHub gives one."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a") as out:
+            out.write("\n".join(lines) + "\n")
+
+
+def wait_for(api, target, title, config, release, migration, sleep, attempts, since=0):
+    seen = {}
     for _ in range(attempts):
+        if not migration:
+            verdicts(api, target["appName"], since, seen)
+            back = sorted(s for s, state in seen.items() if state in ROLLED_BACK)
+            if back:
+                summary([f"**Rolled back by Swarm:** {', '.join(back)}; the previous release keeps running."])
+                raise ReleaseError(f"Swarm rolled back {', '.join(back)}; the previous release keeps running.")
+            if any(state in STOPPED for state in seen.values()):
+                raise ReleaseError("Swarm paused the update; inspect the services.")
         deployments = api("deployment.allByCompose", query={"composeId": target["composeId"]})
         deployment = next((item for item in deployments if item["title"] == title), None)
         if deployment and deployment["status"] == "error":
@@ -167,7 +199,10 @@ def wait_for(api, target, title, config, release, migration, sleep, attempts):
                 not migration
                 and sum(item.get("state") == "running" for item in listing) == len(services)
                 and all(running.get(service) == 1 for service in services)
+                # a service Swarm is updating is done only once its watch period passed (`completed`)
+                and all(state == "completed" for state in seen.values())
             ):
+                summary([f"**Released:** {service}: {seen.get(service, 'created')}" for service in services])
                 return
         sleep()
     raise ReleaseError("Release acceptance timed out; Swarm keeps or restores the previous tasks.")
@@ -213,8 +248,9 @@ def promote(api, config, release, root=".", sleep=lambda: time.sleep(5), attempt
                 "autoDeploy": False,
             },
         )
+        since = int(time.time()) - 60  # the deploy's events, allowing for the runner's and server's clocks
         api("compose.deploy", {"composeId": target["composeId"], "title": title})
-        wait_for(api, target, title, config, release, part == "migration", sleep, attempts)
+        wait_for(api, target, title, config, release, part == "migration", sleep, attempts, since)
 
 
 def parse_images(text):

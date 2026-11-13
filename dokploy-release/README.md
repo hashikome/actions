@@ -7,7 +7,14 @@ touches the application.
 Rollback is Dokploy's, not the product's. On Docker Swarm, a service whose new tasks don't become
 healthy is put back during the deploy (each service's `update_config: failure_action: rollback` and a
 health check). A release found wrong later is undone by redeploying the previous revision through
-Dokploy: its Rollback button where it offers one, otherwise by re-running that revision's release. A product that checks its live site
+Dokploy: its Rollback button where it offers one, otherwise by re-running that revision's release.
+
+**Each deploy ends with Swarm's verdict**, from the services' update events (`docker.getEvents`,
+collected while waiting, as Docker keeps only its last 256 events): **released** once every service's
+new tasks are healthy on this attempt and Swarm reports each update `completed` (after its `monitor`
+period); **rolled back** when Swarm reports `rollback_started` or `rollback_completed` for any
+service, which fails the run and says the previous release keeps running; **paused** fails the run
+for inspection. The verdict is written to the run's summary. A product that checks its live site
 after the release does so in a step of its own after this action; a failure there fails the run.
 
 ```yaml

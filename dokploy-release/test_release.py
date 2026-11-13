@@ -96,9 +96,11 @@ def test_refuses_an_input_the_configuration_does_not_allow():
 class Dokploy:
     """A fake Dokploy that records every call."""
 
-    def __init__(self, outcome="complete", previous=False, stops=True):
+    def __init__(self, outcome="complete", previous=False, stops=True, swarm=None):
         self.outcome, self.old_running, self.stops = outcome, previous, stops
         self.calls, self.titles = [], {}
+        # Swarm's update states, as docker events: service -> states in order
+        self.swarm = swarm if swarm is not None else {s: ["updating", "completed"] for s in ("api", "web", "worker")}
 
     def __call__(self, operation, payload=None, query=None):
         payload, query = payload or {}, query or {}
@@ -113,6 +115,19 @@ class Dokploy:
         if operation == "compose.deploy":
             self.titles[payload["composeId"]] = payload["title"]
             return {}
+        if operation == "docker.getEvents":
+            events = [
+                {
+                    "Type": "service",
+                    "Action": "update",
+                    "time": 2**40,
+                    "timeNano": i,
+                    "Actor": {"Attributes": {"name": f"example-abc123_{service}", "updatestate.new": state}},
+                }
+                for service, states in self.swarm.items()
+                for i, state in enumerate(states)
+            ]
+            return {"events": events + [{"Type": "container", "Action": "exec_die", "time": 2**40}]}
         if operation == "deployment.allByCompose":
             return [{"title": self.titles.get(query["composeId"]), "status": "done"}]
         if operation == "docker.getContainersByAppNameMatch":
@@ -247,6 +262,25 @@ def test_without_a_migration_the_application_is_the_only_part(root):
     promote(root, api, single)
     assert not any(call.endswith(":migration") for call in api.calls)
     assert [call for call in api.calls if call.startswith("compose.deploy:")] == ["compose.deploy:application"]
+
+
+def test_a_release_swarm_rolled_back_says_so(root):
+    api = Dokploy(swarm={"api": ["updating", "rollback_started", "rollback_completed"], "web": ["completed"]})
+    with pytest.raises(subject.ReleaseError, match="rolled back api; the previous release keeps running"):
+        promote(root, api)
+
+
+def test_released_only_once_swarm_completes_every_update(root):
+    still = Dokploy(swarm={"api": ["updating"], "web": ["completed"], "worker": ["completed"]})
+    with pytest.raises(subject.ReleaseError, match="timed out"):
+        promote(root, still)
+    promote(root, Dokploy())  # every service completed
+    promote(root, Dokploy(swarm={}))  # a first deploy creates services: no update to wait for
+
+
+def test_a_paused_update_is_not_a_release(root):
+    with pytest.raises(subject.ReleaseError, match="paused"):
+        promote(root, Dokploy(swarm={"api": ["updating", "paused"]}))
 
 
 def test_a_shared_input_must_agree(root):
