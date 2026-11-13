@@ -151,7 +151,8 @@ def verdicts(api, app_name, since, seen):
 
 
 def summary(lines):
-    """The verdict in the run's summary, when GitHub gives one."""
+    """The verdict in the run's log, and in its summary when GitHub gives one."""
+    print("\n".join(line.replace("**", "") for line in lines), flush=True)
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         with open(path, "a") as out:
