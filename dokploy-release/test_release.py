@@ -283,6 +283,26 @@ def test_a_paused_update_is_not_a_release(root):
         promote(root, Dokploy(swarm={"api": ["updating", "paused"]}))
 
 
+def test_a_read_dokploy_cannot_answer_for_a_moment_is_retried(root):
+    api, missed = Dokploy(), []
+
+    def busy(operation, payload=None, query=None):
+        if operation == "deployment.allByCompose" and len(missed) < 2:
+            missed.append(operation)
+            raise subject.Unanswered("Dokploy deployment.allByCompose failed; response withheld.")
+        return api(operation, payload, query)
+
+    subject.promote(busy, CONFIG, RELEASE, root, lambda: None, 5)  # released after two misses
+
+    def down(operation, payload=None, query=None):
+        if operation == "deployment.allByCompose":
+            raise subject.Unanswered("Dokploy deployment.allByCompose failed; response withheld.")
+        return Dokploy()(operation, payload, query)
+
+    with pytest.raises(subject.Unanswered):
+        subject.promote(down, CONFIG, RELEASE, root, lambda: None, 20)
+
+
 def test_a_shared_input_must_agree(root):
     api = Dokploy()
     original = api.__call__

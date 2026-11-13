@@ -25,10 +25,16 @@ RELEASE_KEYS = {"RELEASE_SHA", "RELEASE_ATTEMPT", "APP_REPLICAS"}
 # last 256 events, so they are collected while waiting, not asked for afterwards.
 ROLLED_BACK = {"rollback_started", "rollback_completed", "rollback_paused"}
 STOPPED = {"paused"}
+# Reads while a Stack deploys can fail for a moment (Dokploy busy, the edge); so many in a row is real
+POLL_FAILURES = 6
 
 
 class ReleaseError(Exception):
     """A refusal of ours. The message is written here, so it is safe to print."""
+
+
+class Unanswered(ReleaseError):
+    """A Dokploy call that didn't succeed: while a Stack deploys, a read may be retried."""
 
 
 def validate(config, release):
@@ -135,7 +141,7 @@ def application_service(container, app_name, config, release):
 
 def verdicts(api, app_name, since, seen):
     """Each service's latest Swarm update state since the deploy began, added to `seen`."""
-    result = api("docker.getEvents", query={"minutes": 5}) or {}
+    result = api("docker.getEvents", query={"minutes": 1}) or {}
     for event in sorted(result.get("events") or [], key=lambda e: e.get("timeNano") or 0):
         attributes = (event.get("Actor") or {}).get("Attributes") or {}
         name, state = attributes.get("name") or "", attributes.get("updatestate.new")
@@ -153,59 +159,72 @@ def summary(lines):
 
 
 def wait_for(api, target, title, config, release, migration, sleep, attempts, since=0):
-    seen = {}
+    seen, failures = {}, 0
     for _ in range(attempts):
-        if not migration:
-            verdicts(api, target["appName"], since, seen)
-            back = sorted(s for s, state in seen.items() if state in ROLLED_BACK)
-            if back:
-                summary([f"**Rolled back by Swarm:** {', '.join(back)}; the previous release keeps running."])
-                raise ReleaseError(f"Swarm rolled back {', '.join(back)}; the previous release keeps running.")
-            if any(state in STOPPED for state in seen.values()):
-                raise ReleaseError("Swarm paused the update; inspect the services.")
-        deployments = api("deployment.allByCompose", query={"composeId": target["composeId"]})
-        deployment = next((item for item in deployments if item["title"] == title), None)
-        if deployment and deployment["status"] == "error":
-            raise ReleaseError("Dokploy deployment failed; inspect before retrying.")
-        if deployment and deployment["status"] == "done":
-            # Dokploy's stack listing filters desired-state=running. The all-state listing
-            # includes completed migrations, so verify exact Swarm labels below.
-            query = {"appName": target["appName"]}
-            if not migration:
-                query["appType"] = "stack"
-            listing = api("docker.getContainersByAppNameMatch", query=query)
-            complete = matched = 0
-            running = {}
-            for item in listing:
-                if not re.fullmatch(r"[a-f0-9]{12,64}", item.get("containerId", "")):
-                    continue
-                container = inspected(
-                    api("docker.getConfig", query={"containerId": item["containerId"]})
-                )
-                if migration:
-                    state = migration_state(container, target["appName"], config, release)
-                    matched += state != "stale"
-                    complete += state == "complete"
-                else:
-                    service = application_service(container, target["appName"], config, release)
-                    if service:
-                        running[service] = running.get(service, 0) + 1
-            if migration and matched > 1:
-                raise ReleaseError("Ambiguous migration completion; inspect the target.")
-            if migration and complete == 1:
+        try:
+            if poll(api, target, title, config, release, migration, since, seen):
                 return
-            services = config["services"]
-            if (
-                not migration
-                and sum(item.get("state") == "running" for item in listing) == len(services)
-                and all(running.get(service) == 1 for service in services)
-                # a service Swarm is updating is done only once its watch period passed (`completed`)
-                and all(state == "completed" for state in seen.values())
-            ):
-                summary([f"**Released:** {service}: {seen.get(service, 'created')}" for service in services])
-                return
+            failures = 0
+        except Unanswered:  # a read Dokploy couldn't answer is retried; a verdict or a refusal is final
+            failures += 1
+            if failures >= POLL_FAILURES:
+                raise
         sleep()
     raise ReleaseError("Release acceptance timed out; Swarm keeps or restores the previous tasks.")
+
+
+def poll(api, target, title, config, release, migration, since, seen):
+    """One look at the deploy: True once it is released, False to look again; raises on a verdict."""
+    if not migration:
+        verdicts(api, target["appName"], since, seen)
+        back = sorted(s for s, state in seen.items() if state in ROLLED_BACK)
+        if back:
+            summary([f"**Rolled back by Swarm:** {', '.join(back)}; the previous release keeps running."])
+            raise ReleaseError(f"Swarm rolled back {', '.join(back)}; the previous release keeps running.")
+        if any(state in STOPPED for state in seen.values()):
+            raise ReleaseError("Swarm paused the update; inspect the services.")
+    deployments = api("deployment.allByCompose", query={"composeId": target["composeId"]})
+    deployment = next((item for item in deployments if item["title"] == title), None)
+    if deployment and deployment["status"] == "error":
+        raise ReleaseError("Dokploy deployment failed; inspect before retrying.")
+    if deployment and deployment["status"] == "done":
+        # Dokploy's stack listing filters desired-state=running. The all-state listing
+        # includes completed migrations, so verify exact Swarm labels below.
+        query = {"appName": target["appName"]}
+        if not migration:
+            query["appType"] = "stack"
+        listing = api("docker.getContainersByAppNameMatch", query=query)
+        complete = matched = 0
+        running = {}
+        for item in listing:
+            if not re.fullmatch(r"[a-f0-9]{12,64}", item.get("containerId", "")):
+                continue
+            container = inspected(
+                api("docker.getConfig", query={"containerId": item["containerId"]})
+            )
+            if migration:
+                state = migration_state(container, target["appName"], config, release)
+                matched += state != "stale"
+                complete += state == "complete"
+            else:
+                service = application_service(container, target["appName"], config, release)
+                if service:
+                    running[service] = running.get(service, 0) + 1
+        if migration and matched > 1:
+            raise ReleaseError("Ambiguous migration completion; inspect the target.")
+        if migration and complete == 1:
+            return True
+        services = config["services"]
+        if (
+            not migration
+            and sum(item.get("state") == "running" for item in listing) == len(services)
+            and all(running.get(service) == 1 for service in services)
+            # a service Swarm is updating is done only once its watch period passed (`completed`)
+            and all(state == "completed" for state in seen.values())
+        ):
+            summary([f"**Released:** {service}: {seen.get(service, 'created')}" for service in services])
+            return True
+    return False
 
 
 def stack_problem(target, pattern):
@@ -283,7 +302,7 @@ def dokploy(origin, key):
         )
         body, _, status = result.stdout.rpartition("\n")
         if result.returncode or status != "200":
-            raise ReleaseError(f"Dokploy {operation} failed; response withheld.")
+            raise Unanswered(f"Dokploy {operation} failed; response withheld.")
         return json.loads(body or "null")
 
     return api
